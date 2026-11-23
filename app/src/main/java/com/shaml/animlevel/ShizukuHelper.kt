@@ -52,14 +52,11 @@ object ShizukuHelper {
 
     fun requestPermission() {
         if (!isAvailable) return
-        if (Shizuku.isPreV11() || Shizuku.getVersion() < 11) {
-            // Old API – not supported, skip
-            return
-        }
+        if (Shizuku.isPreV11() || Shizuku.getVersion() < 11) return
         Shizuku.requestPermission(SHIZUKU_PERMISSION_CODE)
     }
 
-    private fun checkPermission(): Boolean {
+    fun checkPermission(): Boolean {
         return try {
             if (Shizuku.isPreV11() || Shizuku.getVersion() < 11) false
             else Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
@@ -70,26 +67,62 @@ object ShizukuHelper {
     }
 
     /**
-     * Run [cmd] as the ADB shell user via Shizuku's newProcess API.
-     * Uses the Java wrapper to avoid Kotlin visibility issues with ShizukuRemoteProcess.
-     * Returns true if the command exited with code 0.
+     * Run a shell command string via /system/bin/sh -c
      */
     fun runShellCommand(cmd: String): Boolean {
-        if (!isAvailable || !isPermissionGranted) return false
+        if (!isAvailable || !checkPermission()) return false
         return try {
-            val exitCode = ShizukuProcessHelper.runCommand(arrayOf("sh", "-c", cmd))
-            if (exitCode != 0) Log.w(TAG, "Command exited with $exitCode: $cmd")
-            exitCode == 0
+            val res = ShizukuProcessHelper.runCommandDetailed(arrayOf("/system/bin/sh", "-c", cmd))
+            if (res.exitCode != 0) {
+                Log.w(TAG, "Command failed (code ${res.exitCode}): $cmd | stderr: ${res.stderr}")
+            }
+            res.exitCode == 0
         } catch (e: Exception) {
             Log.e(TAG, "runShellCommand failed: $e")
             false
         }
     }
 
-    /** Set `persist.sys.oplus.anim_level` via Shizuku shell. */
+    /**
+     * Run direct executable array
+     */
+    fun runDirectCommand(args: Array<String>): Boolean {
+        if (!isAvailable || !checkPermission()) return false
+        return try {
+            val res = ShizukuProcessHelper.runCommandDetailed(args)
+            if (res.exitCode != 0) {
+                Log.w(TAG, "Direct command failed (code ${res.exitCode}): ${args.joinToString(" ")} | stderr: ${res.stderr}")
+            }
+            res.exitCode == 0
+        } catch (e: Exception) {
+            Log.e(TAG, "runDirectCommand failed: $e")
+            false
+        }
+    }
+
+    /**
+     * Set `persist.sys.oplus.anim_level` via Shizuku.
+     * Tries:
+     * 1. Native IShizukuService.setSystemProperty (zero-process direct IPC)
+     * 2. Direct /system/bin/setprop binary execution
+     * 3. Shell /system/bin/sh -c "setprop ..."
+     */
     fun setAnimLevel(level: Int): Boolean {
-        val cmd = AnimLevelManager.buildSetpropCmd(level)
-        Log.d(TAG, "Executing: $cmd")
-        return runShellCommand(cmd)
+        val levelStr = level.toString()
+
+        // Method 1: Native Shizuku AIDL service call
+        if (ShizukuProcessHelper.setSystemPropertyDirect(AnimLevelManager.PROP_KEY, levelStr)) {
+            Log.d(TAG, "setAnimLevel succeeded via AIDL setSystemProperty")
+            return true
+        }
+
+        // Method 2: Direct /system/bin/setprop execution
+        if (runDirectCommand(arrayOf("/system/bin/setprop", AnimLevelManager.PROP_KEY, levelStr))) {
+            Log.d(TAG, "setAnimLevel succeeded via /system/bin/setprop")
+            return true
+        }
+
+        // Method 3: Shell invocation
+        return runShellCommand("/system/bin/setprop ${AnimLevelManager.PROP_KEY} $levelStr")
     }
 }
